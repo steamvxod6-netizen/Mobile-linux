@@ -73,12 +73,14 @@ public class MobileLinux {
                 else creato(t[1].trim());
             } else if (t[0].equals("start")) {
                 startCmd(t.length > 1 ? t[1] : "");
+            } else if (t[0].equals("allow")) {
+                allowCmd();
             } else if (t[0].equals("li")) {
                 liCmd(t.length > 1 ? t[1] : "");
             } else if (t[0].equals("go")) {
                 goCmd(t.length > 1 ? t[1] : "");
             } else if (t[0].equals("help")) {
-                help();
+                help(t.length > 1 ? t[1] : "");
             } else if (t[0].equals("search") || t[0].equals("list") || t[0].equals("show")
                     || t[0].equals("remove")) {
                 pkgCmd(t[0], t.length > 1 ? t[1] : "");
@@ -86,7 +88,9 @@ public class MobileLinux {
                 downloadCmd(t.length > 1 ? t[1] : "");
             } else if (t[0].equals("python") || t[0].equals("python3")) {
                 runPython(t.length > 1 ? t[1] : "");
-            } else out.println(t[0] + ": команда не найдена (список команд: help)");
+            } else if (!extra(t[0], t.length > 1 ? t[1] : "")) {
+                out.println(t[0] + ": команда не найдена. Список команд: help");
+            }
         }
     }
 
@@ -305,6 +309,12 @@ public class MobileLinux {
     }
 
     static void progress(long done, long total, long ms) {
+        if (total <= 0) {
+            double sp = ms > 0 ? done / 1048576.0 / (ms / 1000.0) : 0;
+            out.print(String.format(Locale.US, "\r%.1f MB  %.1f MB/s ", done / 1048576.0, sp));
+            out.flush();
+            return;
+        }
         int pct = total > 0 ? (int) (done * 100 / total) : 0;
         int barW = cols < 60 ? 8 : Math.max(8, Math.min(30, cols - 45));
         int filled = barW * pct / 100;
@@ -405,9 +415,462 @@ public class MobileLinux {
         else out.println("go: нет такой папки или файла (или нет доступа): " + target);
     }
 
-    /** li — показать, что лежит в текущей папке (папка / файл). li -a — вместе со скрытыми. */
+    /** Имя Android-приложения, в котором мы запущены (берём из пути вида /data/user/0/<пакет>/...). */
+    static String androidPackage() {
+        java.util.regex.Pattern pat = java.util.regex.Pattern.compile("/data/(?:user/\\d+|data)/([A-Za-z0-9_.]+)/");
+        for (String d : new String[]{System.getProperty("user.home"), System.getProperty("user.dir")}) {
+            if (d == null) continue;
+            java.util.regex.Matcher m = pat.matcher(d + "/");
+            if (m.find()) return m.group(1);
+        }
+        return null;
+    }
+
+    /** allow — проверить доступ к памяти телефона и помочь его включить. */
+    static void allowCmd() {
+        for (String d : new String[]{"/storage/emulated/0", "/sdcard"}) {
+            String[] l = new File(d).list();
+            if (l != null && l.length > 0) {
+                out.println("Доступ к памяти телефона уже есть: " + d);
+                out.println("Войти:  go " + d);
+                return;
+            }
+        }
+        if (!new File("/storage/emulated/0").exists() && !new File("/sdcard").exists()) {
+            out.println("allow: память Android здесь не видна (команда нужна только на телефоне).");
+            return;
+        }
+        String pkg = androidPackage();
+        out.println("Доступа к памяти телефона пока нет.");
+        boolean opened = false;
+        if (pkg != null) {
+            try {
+                Process pr = new ProcessBuilder("am", "start", "-a", "android.settings.APPLICATION_DETAILS_SETTINGS",
+                        "-d", "package:" + pkg).redirectErrorStream(true).start();
+                pr.getInputStream().readAllBytes();
+                opened = pr.waitFor() == 0;
+            } catch (Exception ignored) {}
+        }
+        out.println(opened ? "Открываю настройки приложения..." : "Автоматически открыть настройки не получилось.");
+        out.println("Сделай так:");
+        out.println(" 1. Настройки телефона → Приложения → " + (pkg != null ? pkg : "это приложение"));
+        out.println(" 2. Разрешения → Файлы и медиа (или Память) → Разрешить.");
+        out.println("    На Android 11 и новее: «Доступ ко всем файлам» → включить.");
+        out.println(" 3. Вернись сюда и введи allow ещё раз.");
+    }
+
+    // ---------- команды для файлов, системы и сети ----------
+    static List<String> splitArgs(String s) {
+        List<String> r = new ArrayList<>();
+        StringBuilder b = new StringBuilder();
+        char q = 0;
+        boolean has = false;
+        for (char c : s.toCharArray()) {
+            if (q != 0) { if (c == q) q = 0; else b.append(c); }
+            else if (c == '"' || c == '\'') { q = c; has = true; }
+            else if (Character.isWhitespace(c)) {
+                if (b.length() > 0 || has) { r.add(b.toString()); b.setLength(0); has = false; }
+            } else b.append(c);
+        }
+        if (b.length() > 0 || has) r.add(b.toString());
+        return r;
+    }
+
+    static String human(long n) {
+        if (n < 1024) return n + " B";
+        double v = n;
+        String[] u = {"KB", "MB", "GB", "TB"};
+        int i = -1;
+        while (v >= 1024 && i < 3) { v /= 1024; i++; }
+        return String.format(Locale.US, "%.1f %s", v, u[i]);
+    }
+
+    static boolean askYN(String q) throws IOException {
+        out.print(q + " [Y/n] ");
+        out.flush();
+        while (true) {
+            int k = readKey();
+            if (k == -1) return false;
+            if (k == 'y' || k == 'Y' || k == 'н' || k == 'Н') { out.println("Y"); return true; }
+            if (k == 'n' || k == 'N' || k == 'т' || k == 'Т') { out.println("N"); return false; }
+        }
+    }
+
+    /** Обрабатывает команды для файлов, системы и сети. true = команда распознана. */
+    static boolean extra(String cmd, String rest) {
+        try {
+            List<String> a = splitArgs(rest);
+            switch (cmd) {
+                case "where": out.println(cwd); return true;
+                case "newdir": newdirCmd(a); return true;
+                case "newfile": newfileCmd(a); return true;
+                case "view": viewCmd(a); return true;
+                case "copy": copyCmd(a); return true;
+                case "move": moveCmd(a); return true;
+                case "del": delCmd(a); return true;
+                case "me": out.println(System.getProperty("user.name")); return true;
+                case "sysinfo": sysinfoCmd(); return true;
+                case "now":
+                    out.println(java.time.ZonedDateTime.now()
+                            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss (z)")));
+                    return true;
+                case "disk": diskCmd(); return true;
+                case "mem": memCmd(); return true;
+                case "hist":
+                    for (int i = 0; i < history.size(); i++) out.println(" " + (i + 1) + "  " + history.get(i));
+                    return true;
+                case "cls": out.print("\033[2J\033[H"); out.flush(); return true;
+                case "check": checkCmd(a); return true;
+                case "fetch": fetchCmd(a); return true;
+                case "get": getCmd(a); return true;
+                case "net": netCmd(); return true;
+                case "conns": connsCmd(); return true;
+                case "update": updateCmd(); return true;
+                case "upgrade": upgradeCmd(); return true;
+                default: return false;
+            }
+        } catch (IOException e) {
+            out.println(cmd + ": " + e.getMessage());
+            return true;
+        } catch (Exception e) {
+            out.println(cmd + ": ошибка: " + e);
+            return true;
+        }
+    }
+
+    // --- файлы и папки ---
+    static void newdirCmd(List<String> a) throws IOException {
+        if (a.isEmpty()) { out.println("Использование: newdir <имя>   (например: newdir проекты)"); return; }
+        for (String n : a) {
+            Path d = res(n);
+            if (Files.exists(d)) { out.println("newdir: уже существует: " + n); continue; }
+            Files.createDirectories(d);
+            out.println("Создана папка: " + n);
+        }
+    }
+
+    static void newfileCmd(List<String> a) throws IOException {
+        if (a.isEmpty()) { out.println("Использование: newfile <имя>   (например: newfile a.txt)"); return; }
+        for (String n : a) {
+            Path f = res(n);
+            if (Files.exists(f)) { out.println("newfile: уже существует: " + n); continue; }
+            Files.createFile(f);
+            out.println("Создан файл: " + n);
+        }
+    }
+
+    static void viewCmd(List<String> a) throws IOException {
+        if (a.isEmpty()) { out.println("Использование: view <файл>   (например: view a.txt)"); return; }
+        Path f = res(a.get(0));
+        if (Files.isDirectory(f)) { out.println("view: это папка. Что внутри: li"); return; }
+        if (!Files.isRegularFile(f)) { out.println("view: нет такого файла: " + a.get(0)); return; }
+        long size = Files.size(f);
+        byte[] data;
+        try (InputStream is = Files.newInputStream(f)) { data = is.readNBytes(100000); }
+        for (byte b : data) if (b == 0) { out.println("view: это не текстовый файл, показать нельзя."); return; }
+        String text = new String(data, StandardCharsets.UTF_8);
+        out.print(text);
+        if (!text.endsWith("\n")) out.println();
+        if (size > data.length) out.println("... (показаны первые " + data.length + " байт из " + size + ")");
+    }
+
+    static void copyTree(Path s, Path d) throws IOException {
+        try (java.util.stream.Stream<Path> st = Files.walk(s)) {
+            for (Path x : (Iterable<Path>) st::iterator) {
+                Path t = d.resolve(s.relativize(x).toString());
+                if (Files.isDirectory(x)) Files.createDirectories(t);
+                else Files.copy(x, t);
+            }
+        }
+    }
+
+    static void copyCmd(List<String> a) throws IOException {
+        if (a.size() < 2) { out.println("Использование: copy <откуда> <куда>   (например: copy a.txt b.txt)"); return; }
+        Path s = res(a.get(0)), d = res(a.get(1));
+        if (!Files.exists(s)) { out.println("copy: нет такого файла или папки: " + a.get(0)); return; }
+        if (Files.isDirectory(d)) d = d.resolve(s.getFileName());
+        if (Files.exists(d)) { out.println("copy: уже существует: " + d.getFileName()); return; }
+        if (Files.isDirectory(s)) {
+            if (d.startsWith(s)) { out.println("copy: нельзя копировать папку внутрь самой себя"); return; }
+            copyTree(s, d);
+        } else Files.copy(s, d);
+        out.println("Скопировано: " + a.get(0) + " → " + a.get(1));
+    }
+
+    static void moveCmd(List<String> a) throws IOException {
+        if (a.size() < 2) { out.println("Использование: move <откуда> <куда>   (например: move a.txt b.txt)"); return; }
+        Path s = res(a.get(0)), d = res(a.get(1));
+        if (!Files.exists(s)) { out.println("move: нет такого файла или папки: " + a.get(0)); return; }
+        if (cwd.startsWith(s)) { out.println("move: нельзя перемещать папку, в которой ты находишься"); return; }
+        if (Files.isDirectory(d)) d = d.resolve(s.getFileName());
+        if (Files.exists(d)) { out.println("move: уже существует: " + d.getFileName()); return; }
+        Files.move(s, d);
+        out.println("Перемещено: " + a.get(0) + " → " + a.get(1));
+    }
+
+    static void delCmd(List<String> a) throws IOException {
+        boolean rec = false;
+        List<String> names = new ArrayList<>();
+        for (String x : a) { if (x.equals("-r") || x.equals("-rf")) rec = true; else names.add(x); }
+        if (names.isEmpty()) {
+            out.println("Использование: del <файл>   или   del -r <папка>   (удаляет папку со всем внутри)");
+            return;
+        }
+        for (String n : names) {
+            Path p = res(n);
+            if (!Files.exists(p)) { out.println("del: нет такого файла или папки: " + n); continue; }
+            if (p.equals(BASE) || p.getParent() == null || cwd.startsWith(p)) {
+                out.println("del: нельзя удалить эту папку (ты в ней находишься или она главная): " + n);
+                continue;
+            }
+            if (Files.isDirectory(p)) {
+                if (!rec) { out.println("del: " + n + " — это папка. Чтобы удалить со всем внутри: del -r " + n); continue; }
+                if (!askYN("Удалить папку '" + n + "' и всё, что внутри?")) { out.println("Отменено."); continue; }
+                deleteTree(p);
+                out.println("Удалена папка: " + n);
+            } else {
+                Files.delete(p);
+                out.println("Удалён файл: " + n);
+            }
+        }
+    }
+
+    // --- система ---
+    static String prop(String k) {
+        try {
+            Process p = new ProcessBuilder("getprop", k).redirectErrorStream(true).start();
+            String o = new String(p.getInputStream().readAllBytes()).trim();
+            p.waitFor();
+            return o.isEmpty() ? null : o;
+        } catch (Exception e) { return null; }
+    }
+
+    static void sysinfoCmd() {
+        out.println("Система:      " + System.getProperty("os.name") + " " + System.getProperty("os.version"));
+        out.println("Архитектура:  " + System.getProperty("os.arch"));
+        out.println("Java:         " + System.getProperty("java.version") + " (" + System.getProperty("java.vendor") + ")");
+        String rel = prop("ro.build.version.release"), model = prop("ro.product.model");
+        if (rel != null) out.println("Android:      " + rel + (model != null ? " (" + model + ")" : ""));
+        out.println("Папка программы: " + BASE);
+    }
+
+    static void diskCmd() {
+        String[] ps = {cwd.toString(), "/storage/emulated/0"};
+        String[] names = {"Текущая папка", "Память телефона"};
+        for (int i = 0; i < ps.length; i++) {
+            File f = new File(ps[i]);
+            if (!f.exists() || (i == 1 && f.getTotalSpace() == 0)) continue;
+            long total = f.getTotalSpace(), free = f.getUsableSpace(), used = total - free;
+            out.println(names[i] + ": " + ps[i]);
+            out.println("  Всего:    " + human(total));
+            out.println("  Занято:   " + human(used) + (total > 0 ? " (" + (used * 100 / total) + "%)" : ""));
+            out.println("  Свободно: " + human(free));
+        }
+    }
+
+    static long kbLine(String l) {
+        String d = l.replaceAll("[^0-9]", "");
+        return d.isEmpty() ? 0 : Long.parseLong(d) * 1024;
+    }
+
+    static void memCmd() {
+        try {
+            long total = 0, avail = 0;
+            for (String l : Files.readAllLines(Paths.get("/proc/meminfo"))) {
+                if (l.startsWith("MemTotal:")) total = kbLine(l);
+                if (l.startsWith("MemAvailable:")) avail = kbLine(l);
+            }
+            if (total > 0) {
+                out.println("Память телефона:");
+                out.println("  Всего:      " + human(total));
+                out.println("  Занято:     " + human(total - avail));
+                out.println("  Доступно:   " + human(avail));
+            }
+        } catch (Exception ignored) {}
+        Runtime r = Runtime.getRuntime();
+        out.println("Память Java:  максимум " + human(r.maxMemory()) + ", занято " + human(r.totalMemory() - r.freeMemory()));
+    }
+
+    // --- сеть ---
+    static void checkCmd(List<String> a) {
+        if (a.isEmpty()) { out.println("Использование: check <сайт>   (например: check google.com)"); return; }
+        String h = a.get(0).replaceFirst("^[a-zA-Z]+://", "");
+        int slash = h.indexOf('/');
+        if (slash >= 0) h = h.substring(0, slash);
+        int port = 443;
+        int colon = h.lastIndexOf(':');
+        if (colon > 0) {
+            try { port = Integer.parseInt(h.substring(colon + 1)); h = h.substring(0, colon); }
+            catch (NumberFormatException ignored) {}
+        }
+        java.net.InetAddress addr;
+        try { addr = java.net.InetAddress.getByName(h); }
+        catch (Exception e) { out.println("check: не удалось найти " + h + " (нет интернета или неверное имя)"); return; }
+        out.println("Проверка " + h + " [" + addr.getHostAddress() + "], порт " + port + " (TCP):");
+        int ok = 0;
+        for (int i = 0; i < 4; i++) {
+            long t0 = System.nanoTime();
+            try (java.net.Socket s = new java.net.Socket()) {
+                s.connect(new java.net.InetSocketAddress(addr, port), 3000);
+                out.println("Ответ от " + addr.getHostAddress() + ": время=" + (System.nanoTime() - t0) / 1000000 + " мс");
+                ok++;
+            } catch (IOException e) {
+                out.println("Нет ответа: " + e.getMessage());
+            }
+            pause(500);
+        }
+        out.println("Отправлено 4, получено " + ok + ".");
+    }
+
+    static void fetchCmd(List<String> a) throws IOException {
+        if (a.isEmpty()) { out.println("Использование: fetch <адрес>   (например: fetch example.com)"); return; }
+        String u = a.get(0);
+        if (!u.contains("://")) u = "https://" + u;
+        HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+        c.setConnectTimeout(10000);
+        c.setReadTimeout(15000);
+        c.setRequestProperty("User-Agent", "MobileLinux");
+        try {
+            int code = c.getResponseCode();
+            out.println("HTTP " + code + (c.getResponseMessage() != null ? " " + c.getResponseMessage() : ""));
+            InputStream is = code >= 400 ? c.getErrorStream() : c.getInputStream();
+            if (is == null) return;
+            try (InputStream in2 = is) {
+                byte[] data = in2.readNBytes(20000);
+                boolean more = in2.read() != -1;
+                out.println(new String(data, StandardCharsets.UTF_8));
+                if (more) out.println("... (показаны первые 20000 байт)");
+            }
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    static void getCmd(List<String> a) throws IOException {
+        if (a.isEmpty()) { out.println("Использование: get <адрес> [имя]   (например: get https://example.com/file.zip)"); return; }
+        String u = a.get(0);
+        if (!u.contains("://")) u = "https://" + u;
+        String name;
+        if (a.size() > 1) name = a.get(1);
+        else {
+            String path = new URL(u).getPath();
+            name = path.substring(path.lastIndexOf('/') + 1);
+            if (name.isEmpty()) name = "index.html";
+        }
+        Path dest = res(name);
+        if (Files.exists(dest)) { out.println("get: файл уже существует: " + name); return; }
+        HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+        c.setConnectTimeout(15000);
+        c.setReadTimeout(30000);
+        c.setRequestProperty("User-Agent", "MobileLinux");
+        Path part = dest.resolveSibling(dest.getFileName() + ".part");
+        try {
+            int code = c.getResponseCode();
+            if (code >= 400) { out.println("get: ошибка сервера HTTP " + code); return; }
+            long total = c.getContentLengthLong();
+            out.println("Скачиваю " + u + " → " + name + (total > 0 ? " (" + human(total) + ")" : ""));
+            try (InputStream is = c.getInputStream()) { transfer(is, part, total); }
+            Files.move(part, dest);
+            out.println("Готово: " + name + " (" + human(Files.size(dest)) + ")");
+        } catch (IOException e) {
+            try { Files.deleteIfExists(part); } catch (IOException ignored) {}
+            throw e;
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    static void netCmd() throws Exception {
+        java.util.Enumeration<java.net.NetworkInterface> en = java.net.NetworkInterface.getNetworkInterfaces();
+        if (en == null) { out.println("net: не удалось получить список сетевых интерфейсов."); return; }
+        List<java.net.NetworkInterface> l = java.util.Collections.list(en);
+        l.sort(Comparator.comparing(java.net.NetworkInterface::getName));
+        for (java.net.NetworkInterface ni : l) {
+            out.println(ni.getName() + "  " + (ni.isUp() ? "UP" : "DOWN") + (ni.isLoopback() ? " LOOPBACK" : ""));
+            for (java.net.InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                java.net.InetAddress ad = ia.getAddress();
+                String ip = ad.getHostAddress();
+                int pc = ip.indexOf('%');
+                if (pc > 0) ip = ip.substring(0, pc);
+                out.println("  " + (ad instanceof java.net.Inet6Address ? "inet6 " : "inet ") + ip + "/" + ia.getNetworkPrefixLength());
+            }
+        }
+    }
+
+    static String procAddr(String h) throws Exception {
+        String[] p = h.split(":");
+        String hex = p[0];
+        byte[] b = new byte[hex.length() / 2];
+        for (int g = 0; g < hex.length() / 8; g++)
+            for (int j = 0; j < 4; j++)
+                b[g * 4 + j] = (byte) Integer.parseInt(hex.substring(g * 8 + (3 - j) * 2, g * 8 + (3 - j) * 2 + 2), 16);
+        return java.net.InetAddress.getByAddress(b).getHostAddress() + ":" + Integer.parseInt(p[1], 16);
+    }
+
+    static String tcpState(String h) {
+        switch (h.toUpperCase()) {
+            case "01": return "ESTABLISHED";
+            case "02": return "SYN_SENT";
+            case "03": return "SYN_RECV";
+            case "04": return "FIN_WAIT1";
+            case "05": return "FIN_WAIT2";
+            case "06": return "TIME_WAIT";
+            case "07": return "CLOSE";
+            case "08": return "CLOSE_WAIT";
+            case "09": return "LAST_ACK";
+            case "0A": return "LISTEN";
+            case "0B": return "CLOSING";
+            default: return h;
+        }
+    }
+
+    static void connsCmd() {
+        List<String> rows = new ArrayList<>();
+        for (String f : new String[]{"/proc/net/tcp", "/proc/net/tcp6"}) {
+            List<String> ls;
+            try { ls = Files.readAllLines(Paths.get(f)); } catch (IOException e) { continue; }
+            for (int i = 1; i < ls.size(); i++) {
+                String[] p = ls.get(i).trim().split("\\s+");
+                if (p.length < 4) continue;
+                try {
+                    rows.add(fit(f.endsWith("6") ? "tcp6" : "tcp", 6) + fit(procAddr(p[1]), 24) + fit(procAddr(p[2]), 24) + tcpState(p[3]));
+                } catch (Exception ignored) {}
+            }
+        }
+        if (rows.isEmpty()) {
+            out.println("Нет данных: Android не разрешает приложениям читать список соединений (или их нет).");
+            return;
+        }
+        out.println(fit("Тип", 6) + fit("Локальный", 24) + fit("Удалённый", 24) + "Состояние");
+        for (String r : rows) out.println(r);
+    }
+
+    // --- пакеты: update / upgrade ---
+    static void updateCmd() {
+        step("Reading package lists", 300);
+        int n = 1;
+        for (Pkg p : ALL) {
+            long sz = headSize(p.url);
+            out.println((sz > 0 ? "Hit:" : "Err:") + n++ + " https://repo1.maven.org/maven2 " + p.name + " " + p.ver
+                    + (sz > 0 ? "" : "  (нет связи)"));
+        }
+        out.println("Список пакетов проверен.");
+    }
+
+    static void upgradeCmd() {
+        step("Reading package lists", 300);
+        step("Calculating upgrade", 300);
+        out.println("0 upgraded, 0 newly installed, 0 to remove.");
+        out.println("Все пакеты актуальны: версии пакетов зафиксированы в этой версии программы.");
+    }
+
+    // ---------- li ----------
+    /** li — что лежит в текущей папке. -a скрытые, -l подробно. */
     static void liCmd(String arg) {
-        boolean all = arg.trim().equals("-a");
+        boolean all = false, lng = false;
+        for (String t : arg.trim().split("\\s+")) {
+            if (t.startsWith("-")) { if (t.contains("a")) all = true; if (t.contains("l")) lng = true; }
+        }
         List<Path> items = new ArrayList<>();
         try (DirectoryStream<Path> st = Files.newDirectoryStream(cwd)) {
             for (Path x : st) {
@@ -427,26 +890,86 @@ public class MobileLinux {
         int w = 0;
         for (Path x : items) w = Math.max(w, x.getFileName().toString().length());
         w = Math.min(w, 30);
+        java.time.format.DateTimeFormatter df =
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(java.time.ZoneId.systemDefault());
         for (Path x : items) {
             String n = x.getFileName().toString();
-            out.println(n + " ".repeat(Math.max(0, w - n.length())) + "  " + (Files.isDirectory(x) ? "папка" : "файл"));
+            boolean dir = Files.isDirectory(x);
+            String kind = dir ? "папка" : "файл";
+            if (!lng) { out.println(n + " ".repeat(Math.max(0, w - n.length())) + "  " + kind); continue; }
+            String size = "-", date = "";
+            try {
+                if (!dir) size = human(Files.size(x));
+                date = df.format(Files.getLastModifiedTime(x).toInstant());
+            } catch (IOException ignored) {}
+            out.println(fit(kind, 6) + String.format("%9s", size) + "  " + date + "  " + n);
         }
     }
 
-    static void help() {
-        out.println("Команды Mobile Linux:");
-        out.println(" creato <файл>         создать файл и открыть редактор");
-        out.println(" go <имя>              войти в папку или файл (go .. — назад)");
-        out.println(" li                    что лежит в текущей папке");
-        out.println(" download pkt <пакет>  установить пакет (python, javascript)");
-        out.println(" start <язык> <файл>   запустить файл (python, javascript)");
-        out.println(" python <файл.py>      запустить Python напрямую");
-        out.println(" search [слово]        поиск пакетов");
-        out.println(" list                  установленные пакеты");
-        out.println(" show <пакет>          информация о пакете");
-        out.println(" remove <пакет>        удалить пакет");
-        out.println(" help                  список команд");
-        out.println(" exit                  выход");
+    // ---------- help ----------
+    static final String[][] HELP = {
+        {"#", "Файлы и папки"},
+        {"where", "показать, в какой папке ты сейчас", "where"},
+        {"go <имя>", "войти в папку или файл; go .. — назад", "go проекты\ngo ..\ngo /sdcard"},
+        {"li [-a] [-l]", "что лежит в папке (-a скрытые, -l подробно)", "li\nli -l"},
+        {"newdir <имя>", "создать папку", "newdir проекты"},
+        {"newfile <имя>", "создать пустой файл", "newfile a.txt"},
+        {"creato <файл>", "создать файл и открыть редактор", "creato main.py\ncreato test.cpp"},
+        {"view <файл>", "показать содержимое файла", "view a.txt"},
+        {"copy <откуда> <куда>", "копировать файл или папку", "copy a.txt b.txt"},
+        {"move <откуда> <куда>", "переместить или переименовать", "move a.txt b.txt"},
+        {"del [-r] <имя>", "удалить файл (-r — папку со всем внутри)", "del a.txt\ndel -r проекты"},
+        {"#", "Система"},
+        {"me", "имя пользователя", "me"},
+        {"sysinfo", "информация о системе", "sysinfo"},
+        {"now", "дата и время", "now"},
+        {"disk", "сколько места на диске", "disk"},
+        {"mem", "сколько памяти (RAM)", "mem"},
+        {"hist", "история введённых команд", "hist"},
+        {"cls", "очистить экран", "cls"},
+        {"allow", "доступ к памяти телефона", "allow"},
+        {"#", "Сеть"},
+        {"check <сайт>", "проверить связь с сайтом (TCP)", "check google.com"},
+        {"fetch <адрес>", "показать ответ сайта", "fetch example.com"},
+        {"get <адрес> [имя]", "скачать файл в текущую папку", "get https://example.com/file.zip"},
+        {"net", "сетевые интерфейсы и IP-адреса", "net"},
+        {"conns", "сетевые соединения", "conns"},
+        {"#", "Пакеты и запуск"},
+        {"download pkt <пакет>", "установить пакет (python, javascript)", "download pkt python"},
+        {"update", "проверить список пакетов", "update"},
+        {"upgrade", "проверить обновления пакетов", "upgrade"},
+        {"search [слово]", "поиск пакетов", "search python"},
+        {"list", "установленные пакеты", "list"},
+        {"show <пакет>", "информация о пакете", "show python"},
+        {"remove <пакет>", "удалить пакет", "remove python"},
+        {"start <язык> <файл>", "найти и запустить файл", "start python a.py\nstart javascript a.js"},
+        {"python <файл.py>", "запустить Python напрямую", "python a.py"},
+        {"#", "Прочее"},
+        {"help [команда]", "список команд; help li — подробности", "help\nhelp li"},
+        {"exit", "выход", "exit"},
+    };
+
+    static void help(String arg) {
+        arg = arg.trim().toLowerCase();
+        if (!arg.isEmpty()) {
+            for (String[] r : HELP) {
+                if (r[0].equals("#")) continue;
+                if (r[0].split(" ")[0].toLowerCase().equals(arg)) {
+                    out.println("Команда:     " + r[0]);
+                    out.println("Что делает:  " + r[1]);
+                    out.println("Примеры:");
+                    for (String ex : r[2].split("\n")) out.println("  " + ex);
+                    return;
+                }
+            }
+            out.println("help: нет такой команды: " + arg + ". Список: help");
+            return;
+        }
+        out.println("Команды Mobile Linux (подробности: help <команда>)");
+        for (String[] r : HELP) {
+            if (r[0].equals("#")) { out.println(); out.println("== " + r[1] + " =="); continue; }
+            out.println(" " + fit(r[0], 22) + " " + r[1]);
+        }
         out.println();
         out.println("Редактор: ,, (две запятые) — команды: Q сохранить, X выйти, N новый файл.");
         out.println("          .. (две точки) — назад к тексту.");
