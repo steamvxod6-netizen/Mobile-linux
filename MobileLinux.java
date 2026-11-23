@@ -73,6 +73,8 @@ public class MobileLinux {
                 else creato(t[1].trim());
             } else if (t[0].equals("start")) {
                 startCmd(t.length > 1 ? t[1] : "");
+            } else if (t[0].equals("li")) {
+                liCmd(t.length > 1 ? t[1] : "");
             } else if (t[0].equals("go")) {
                 goCmd(t.length > 1 ? t[1] : "");
             } else if (t[0].equals("help")) {
@@ -403,10 +405,39 @@ public class MobileLinux {
         else out.println("go: нет такой папки или файла (или нет доступа): " + target);
     }
 
+    /** li — показать, что лежит в текущей папке (папка / файл). li -a — вместе со скрытыми. */
+    static void liCmd(String arg) {
+        boolean all = arg.trim().equals("-a");
+        List<Path> items = new ArrayList<>();
+        try (DirectoryStream<Path> st = Files.newDirectoryStream(cwd)) {
+            for (Path x : st) {
+                if (!all && x.getFileName().toString().startsWith(".")) continue;
+                items.add(x);
+            }
+        } catch (IOException e) {
+            out.println("li: не удалось прочитать папку: " + e.getMessage());
+            return;
+        }
+        if (items.isEmpty()) { out.println("Внутри нет ни файлов, ни папок."); return; }
+        items.sort((p1, p2) -> {
+            boolean d1 = Files.isDirectory(p1), d2 = Files.isDirectory(p2);
+            if (d1 != d2) return d1 ? -1 : 1;                                   // сначала папки
+            return p1.getFileName().toString().compareToIgnoreCase(p2.getFileName().toString());
+        });
+        int w = 0;
+        for (Path x : items) w = Math.max(w, x.getFileName().toString().length());
+        w = Math.min(w, 30);
+        for (Path x : items) {
+            String n = x.getFileName().toString();
+            out.println(n + " ".repeat(Math.max(0, w - n.length())) + "  " + (Files.isDirectory(x) ? "папка" : "файл"));
+        }
+    }
+
     static void help() {
         out.println("Команды Mobile Linux:");
         out.println(" creato <файл>         создать файл и открыть редактор");
         out.println(" go <имя>              войти в папку или файл (go .. — назад)");
+        out.println(" li                    что лежит в текущей папке");
         out.println(" download pkt <пакет>  установить пакет (python, javascript)");
         out.println(" start <язык> <файл>   запустить файл (python, javascript)");
         out.println(" python <файл.py>      запустить Python напрямую");
